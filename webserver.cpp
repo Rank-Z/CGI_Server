@@ -1,4 +1,3 @@
-
 #include<sys/socket.h>
 #include<iostream>
 #include<stdlib.h>
@@ -10,25 +9,108 @@
 #include<algorithm>
 #include<fcntl.h>
 #include<pthread.h>
-
+#include<sys/stat.h>
+#include<sys/mman.h>
+#include<sys/wait.h>
 
 constexpr in_port_t used_port = 8000;
 #define SERVER_PATH "/home/rankzero/Desktop"
 
-void _out(const char* mesg)
+enum Method
+{
+	GET=0,
+	POST,
+	FAIL
+};
+
+
+void handle_cgi(int connfd , Method met , const char* filename , const char* args);
+
+
+inline void _out(const char* mesg)
 {
 	std::cout << mesg << std::endl;
 }
 
 
-int headers(int connfd , const char* filename , int size)
+int read_line(int connfd , char* usrbuf, int bufsize)
+{
+	int n = 1;
+	for (; n < bufsize ; ++n)
+	{
+		recv(connfd , usrbuf , 1 , 0);
+		if ((*usrbuf == '\n')&&(*(usrbuf - 1) == '\r'))
+			break;
+		++usrbuf;
+	}
+	++usrbuf;
+	*usrbuf = '\0';
+	return n;
+}
+
+void pass_other(int connfd)
+{
+	char buf [256];
+	while (read_line(connfd , buf , 256) > 2)
+	{   }
+}
+
+int get_content_length(int connfd)
+{
+	char buf [256];
+	int ret;
+	while (read_line(connfd , buf , 256) > 2)
+	{
+		std::string cont_len("Content-Length:");
+		if (std::equal(cont_len.cbegin() , cont_len.cend() , buf))
+		{
+			ret = atoi(&(buf [15]));
+		}
+	}
+	return ret;
+}
+
+
+void get_filetype(const char* filename , char* dest)
+{
+	if (strstr(filename , ".html"))
+		strcpy(dest , "text/html");
+	else if (strstr(filename , ".gif"))
+		strcpy(dest , "image/gif");
+	else if (strstr(filename , ".png"))
+		strcpy(dest , "image/gif");
+	else if (strstr(filename , ".jpg"))
+		strcpy(dest , "image/gif");
+	else
+		strcpy(dest , "text/plain");
+}
+
+void bad_request(int connfd)
 {
 	char buf [1024];
+	strcpy(buf , "HTTP/1.0 404 NOT FOUND\r\n");
+	send(connfd , buf , strlen(buf) , 0);
+	strcpy(buf , "Content-Type: text/html\r\n");
+	send(connfd , buf , strlen(buf) , 0);
+	sprintf(buf , "Content-length:%d\r\n" , 64); //magic number
+	send(connfd , buf , strlen(buf) , 0);
+	strcpy(buf , "\r\n");
+	send(connfd , buf , strlen(buf) , 0);
+	strcpy(buf , "<html><tile>Bad Request</title>\r\n");
+	send(connfd , buf , strlen(buf) , 0);
+	strcpy(buf , "<body>400 bad request</body></html>\r\n");
+	send(connfd , buf , strlen(buf) , 0);
+}
+
+int headers(int connfd , const char* filename , int size)
+{
+	char buf [128];
+	char filetype [128];
 	strcpy(buf , "HTTP/1.0 200 OK\r\n");
 	send(connfd , buf , strlen(buf) , 0);
 	strcpy(buf , "Server:Grt\r\n");
 	send(connfd , buf , strlen(buf) , 0);
-	strcpy(buf , "Content-Type: text/html\r\n");
+	sprintf(buf , "Content-Type: %s\r\n",filetype);
 	send(connfd , buf , strlen(buf) , 0);
 	sprintf(buf , "Content-length:%d\r\n" , size);
 	send(connfd , buf , strlen(buf) , 0);
@@ -44,7 +126,7 @@ void request_fail(int connfd)
 	send(connfd , buf , strlen(buf) , 0);
 	strcpy(buf , "Content-Type: text/html\r\n");
 	send(connfd , buf , strlen(buf) , 0);
-	sprintf(buf , "Content-length:%d\r\n",62);
+	sprintf(buf , "Content-length:%d\r\n",62); //magic number
 	send(connfd , buf , strlen(buf) , 0);
 	strcpy(buf , "\r\n");
 	send(connfd , buf , strlen(buf) , 0);
@@ -66,7 +148,7 @@ void handle_request(void* arg)
 	char* end;
 	bool is_static = true;
 
-	int rec_ret = recv(connfd , buf , 100 , 0);
+	int rec_count = read_line(connfd , buf , 1024);
 	end = std::find(buf , &buf [100] , ' ');
 	*(std::copy(buf , end , method)) = '\0'; //method
 	start = end;
@@ -81,6 +163,11 @@ void handle_request(void* arg)
 	{
 		*(std::copy(start , end , filename + strlen(filename))) = '\0';
 		is_static = false;
+		start = ++end;
+		end = std::find(start , &buf[100] , ' ');
+		if (end == (&buf [100]))
+			end = start;
+		*(std::copy(start , end , args)) = '\0';
 	}
 	else //can't find '?'
 	{
@@ -93,26 +180,82 @@ void handle_request(void* arg)
 	}
 
 
-
-	int filefd = open(filename , O_RDONLY);
-	if (filefd < 0)
+	if (is_static)
 	{
-		_out("open fail");
-		request_fail(connfd);
-		pthread_exit(NULL);
+		pass_other(connfd);
+		int filefd = open(filename , O_RDONLY);
+		if (filefd < 0)
+		{
+			_out("open fail");
+			request_fail(connfd);
+			pthread_exit(NULL);
+		}
+
+		struct stat file_stat;
+		fstat(filefd , &file_stat);
+		int filesize = file_stat.st_size;
+		void* file_start = mmap(NULL , filesize , PROT_READ , MAP_PRIVATE , filefd , 0);
+
+		close(filefd);
+		buf [filesize] = '\0';
+		headers(connfd , filename , filesize);
+
+		int statu = send(connfd , file_start , filesize , 0);
+		_out("send");
+	}
+	else // CGI
+	{
+		Method met;
+		if (strcasecmp(method , "GET") == 0)
+		{
+			met = GET;
+		}
+		else if (strcasecmp(method , "POST") == 0)
+		{
+			met = POST;
+		}
+		else
+		{
+			bad_request(connfd);
+			pthread_exit(NULL);
+		}
+		handle_cgi(connfd , met , filename , args);
 	}
 
-	int filesize = read(filefd , buf , 1024);
-	close(filefd);
-	buf [filesize] = '\0';
-	headers(connfd , filename , strlen(buf));
-
-	int statu = send(connfd , buf , filesize , 0);
-	_out("send");
-
-	pthread_exit(nullptr);
+	pthread_exit(NULL);
 }
 
+void handle_cgi(int connfd , Method met , const char* filename , const char* args)
+{
+	char buf [256];
+	sprintf(buf , "HTTP/1.0 200 OK\r\n");
+	send(connfd , buf , strlen(buf) , 0);
+
+	if (met == GET) 
+	{
+		pass_other(connfd);
+		if (fork() == 0)
+		{
+			setenv("QUERY_STRING" , args , 1);
+			dup2(connfd , STDOUT_FILENO); //equal to STDOUT
+			execve(filename , NULL , environ);
+		}
+	}
+	else if (met == POST)
+	{
+		int length = get_content_length(connfd);
+		if (fork() == 0)
+		{
+			char length_buf [16];
+			sprintf(buf , "%s" , length);
+			setenv("REQUEST_METHOD" , buf , 1);
+			dup2(connfd , STDIN_FILENO);
+			execve(filename , NULL , environ);
+		}
+	}
+	wait(NULL);
+	close(connfd);
+}
 
 
 int main(int argc , char** argv)
@@ -157,7 +300,7 @@ int main(int argc , char** argv)
 
 	while (true)
 	{
-		int connfd = accept(listenfd , nullptr , nullptr);
+		int connfd = accept(listenfd , NULL , NULL);
 		pthread_t newthread;
 		if (pthread_create(&newthread , NULL , (void*(*)(void*))handle_request ,(void*)(intptr_t) connfd) != 0)
 		{
@@ -167,8 +310,5 @@ int main(int argc , char** argv)
 	}
 
 	return 0;
-
-
-
 
 }
