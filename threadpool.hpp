@@ -1,3 +1,5 @@
+#ifndef THREADPOOL_HPP
+#define THREADPOOL_HPP
 
 #include<pthread.h>
 #include<queue>
@@ -89,3 +91,5 @@ private:
 	bool run_;
 	std::queue<Work*> works_;
 };
+
+#endif // !THREADPOOL_HPP

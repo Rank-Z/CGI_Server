@@ -1,3 +1,6 @@
+#ifndef HELPER_HPP
+#define HELPER_HPP
+
 #include<semaphore.h>
 #include<pthread.h>
 
@@ -63,3 +66,5 @@ public:
 private:
 	pthread_mutex_t mutex_;
 };
+
+#endif // !HELPER_HPP
