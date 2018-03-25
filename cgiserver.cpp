@@ -14,8 +14,8 @@
 #include<sys/wait.h>
 #include"threadpool.hpp"
 
-constexpr in_port_t used_port=8000;
-#define SERVER_PATH "/home/rankzero/Desktop"
+constexpr in_port_t used_port=8000; // set port here
+#define SERVER_PATH "/your dir"
 
 enum Method
 {
@@ -229,7 +229,7 @@ void handle_cgi(int connfd, Method met, const char* filename, const char* args)
 		if (fork()==0)
 		{
 			setenv("QUERY_STRING", args, 1);
-			dup2(connfd, STDOUT_FILENO); //equal to STDOUT
+			dup2(connfd, STDOUT_FILENO); // equal to STDOUT
 			execve(filename, NULL, environ);
 		}
 	}
@@ -274,13 +274,12 @@ int main(int argc, char** argv)
 		exit(0);
 	}
 
-	//允许重用本地地址
 	int temp_flag=1;
 	if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &temp_flag, sizeof(temp_flag)) < 0)
 	{
 		exit(0);
 	}
-	//允许重用本地端口
+
 	if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEPORT, &temp_flag, sizeof(temp_flag)) < 0)
 	{
 		exit(0);

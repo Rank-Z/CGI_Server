@@ -67,4 +67,22 @@ private:
 	pthread_mutex_t mutex_;
 };
 
+class MutexLock // RAII
+{
+public:
+	explicit MutexLock(mutex& mutex)
+		:mutex_(mutex)
+	{
+		mutex_.lock();
+	}
+
+	~MutexLock()
+	{
+		mutex_.unlock();
+	}
+
+private:
+	mutex& mutex_;
+};
+
 #endif // !HELPER_HPP

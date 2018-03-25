@@ -44,10 +44,9 @@ public:
 
 	bool append(Work* new_work)
 	{
-		mutex_.lock();
+		MutexLock mutexlock(mutex_);
 		if (works_.size()>=max_works_)
 		{
-			mutex_.unlock();
 			return false;
 		}
 		if (new_work==nullptr)
@@ -55,7 +54,6 @@ public:
 			return false;
 		}
 		works_.push(new_work);
-		mutex_.unlock();
 		sem_.post();
 		return true;
 	}
@@ -65,15 +63,13 @@ public:
 		while (run_)
 		{
 			sem_.wait();
-			mutex_.lock();
+			MutexLock mutexlock(mutex_);
 			if (works_.empty())
 			{
-				mutex_.unlock();
 				continue;
 			}
 			Work* cur_work=works_.front();
 			works_.pop();
-			mutex_.unlock();
 			if (cur_work!=nullptr)
 			{
 				cur_work->run();
