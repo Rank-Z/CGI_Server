@@ -297,7 +297,7 @@ int main(int argc, char** argv)
 		exit(0);
 	}
 
-	if (listen(listenfd, 10) < 0)
+	if (listen(listenfd, 100) < 0)
 	{
 		exit(0);
 	}
