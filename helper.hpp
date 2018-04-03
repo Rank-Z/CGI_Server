@@ -1,56 +1,24 @@
 #ifndef HELPER_HPP
 #define HELPER_HPP
 
-#include<semaphore.h>
 #include<pthread.h>
 
-class sem
+class Mutex
 {
 public:
-	sem()
-		:valid_(false)
-	{
-		if (sem_init(&sem_, 0, 0)==0)
-			valid_=true;
-	}
-
-	~sem()
-	{
-		sem_destroy(&sem_);
-	}
-
-	void reset()
-	{
-		if (sem_init(&sem_, 0, 0)==0)
-			valid_=true;
-	}
-
-	bool wait()
-	{
-		return (sem_wait(&sem_)==0);
-	}
-
-	bool post()
-	{
-		return (sem_post(&sem_)==0);
-	}
-
-private:
-	sem_t sem_;
-	bool valid_;
-};
-
-class mutex
-{
-public:
-	mutex()
+	Mutex()
 	{
 		pthread_mutex_init(&mutex_, NULL);
 	}
 
-	~mutex()
+	~Mutex()
 	{
 		pthread_mutex_destroy(&mutex_);
+	}
+
+	pthread_mutex_t& get_mutex()
+	{
+		return mutex_;
 	}
 
 	bool lock()
@@ -67,10 +35,11 @@ private:
 	pthread_mutex_t mutex_;
 };
 
+
 class MutexLock // RAII
 {
 public:
-	explicit MutexLock(mutex& mutex)
+	explicit MutexLock(Mutex& mutex)
 		:mutex_(mutex)
 	{
 		mutex_.lock();
@@ -82,7 +51,40 @@ public:
 	}
 
 private:
-	mutex& mutex_;
+	Mutex& mutex_;
+};
+
+
+class Cond
+{
+public:
+	explicit Cond(Mutex& mutex)
+		:mutex_(mutex)
+	{
+		if (pthread_cond_init(&cond_, NULL)!=0)
+		{
+			throw "cond cond_ initializztion failed";
+		}
+	}
+
+	~Cond()
+	{
+		pthread_cond_destroy(&cond_);
+	}
+
+	void wait()
+	{
+		pthread_cond_wait(&cond_,&mutex_.get_mutex());
+	}
+
+	void signal()
+	{
+		pthread_cond_signal(&cond_);
+	}
+
+private:
+	Mutex& mutex_;
+	pthread_cond_t cond_;
 };
 
 #endif // !HELPER_HPP

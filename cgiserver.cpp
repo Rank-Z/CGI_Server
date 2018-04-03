@@ -12,9 +12,12 @@
 #include<sys/stat.h>
 #include<sys/mman.h>
 #include<sys/wait.h>
+#include<sys/epoll.h>
 #include"threadpool.hpp"
 
-constexpr in_port_t used_port=8000; // set port here
+constexpr in_port_t used_port=80; // set port here
+constexpr int MAX_EVENT_NUMBER=128;
+
 #define SERVER_PATH "/your dir"
 
 enum Method
@@ -24,11 +27,7 @@ enum Method
 	FAIL
 };
 
-
-void handle_cgi(int connfd, Method met, const char* filename, const char* args);
-
-
-int read_line(int connfd, char* usrbuf, int bufsize)
+inline int read_line(int connfd, char* usrbuf, int bufsize)
 {
 	int n=1;
 	for (; n < bufsize; ++n)
@@ -43,7 +42,7 @@ int read_line(int connfd, char* usrbuf, int bufsize)
 	return n;
 }
 
-void pass_other(int connfd)
+inline void pass_other(int connfd)
 {
 	char buf [256];
 	while (read_line(connfd, buf, 256) > 2)
@@ -65,7 +64,6 @@ int get_content_length(int connfd)
 	}
 	return ret;
 }
-
 
 void get_filetype(const char* filename, char* dest)
 {
@@ -132,6 +130,38 @@ void request_fail(int connfd)
 	send(connfd, buf, strlen(buf), 0);
 }
 
+void handle_cgi(int connfd, Method met, const char* filename, const char* args)
+{
+	char buf [256];
+	sprintf(buf, "HTTP/1.0 200 OK\r\n");
+	send(connfd, buf, strlen(buf), 0);
+
+	if (met==GET)
+	{
+		pass_other(connfd);
+		if (fork()==0)
+		{
+			setenv("QUERY_STRING", args, 1);
+			dup2(connfd, STDOUT_FILENO); // equal to STDOUT
+			execve(filename, NULL, environ);
+		}
+	}
+	else if (met==POST)
+	{
+		int length=get_content_length(connfd);
+		if (fork()==0)
+		{
+			char length_buf [16];
+			sprintf(buf, "%s", length);
+			setenv("REQUEST_METHOD", buf, 1);
+			dup2(connfd, STDIN_FILENO);
+			execve(filename, NULL, environ);
+		}
+	}
+	wait(NULL);
+	close(connfd);
+}
+
 void handle_request(void* arg)
 {
 	int connfd=(intptr_t)arg;
@@ -173,7 +203,6 @@ void handle_request(void* arg)
 		strcat(filename, "index.html");
 	}
 
-
 	if (is_static)
 	{
 		pass_other(connfd);
@@ -181,7 +210,7 @@ void handle_request(void* arg)
 		if (filefd < 0)
 		{
 			request_fail(connfd);
-			pthread_exit(NULL);
+			return;
 		}
 
 		struct stat file_stat;
@@ -193,7 +222,7 @@ void handle_request(void* arg)
 		buf [filesize]='\0';
 		headers(connfd, filename, filesize);
 
-		int statu=send(connfd, file_start, filesize, 0);
+		send(connfd, file_start, filesize, 0);
 	}
 	else // CGI
 	{
@@ -209,52 +238,31 @@ void handle_request(void* arg)
 		else
 		{
 			bad_request(connfd);
-			pthread_exit(NULL);
 		}
 		handle_cgi(connfd, met, filename, args);
 	}
-
-	pthread_exit(NULL);
 }
 
-void handle_cgi(int connfd, Method met, const char* filename, const char* args)
+inline void epoll_addfd(int epollfd, int fd)
 {
-	char buf [256];
-	sprintf(buf, "HTTP/1.0 200 OK\r\n");
-	send(connfd, buf, strlen(buf), 0);
-
-	if (met==GET)
+	epoll_event eevent;
+	eevent.data.fd=fd;
+	eevent.events=EPOLLIN;
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &eevent)==-1)
 	{
-		pass_other(connfd);
-		if (fork()==0)
-		{
-			setenv("QUERY_STRING", args, 1);
-			dup2(connfd, STDOUT_FILENO); // equal to STDOUT
-			execve(filename, NULL, environ);
-		}
+		exit(0);
 	}
-	else if (met==POST)
-	{
-		int length=get_content_length(connfd);
-		if (fork()==0)
-		{
-			char length_buf [16];
-			sprintf(buf, "%s", length);
-			setenv("REQUEST_METHOD", buf, 1);
-			dup2(connfd, STDIN_FILENO);
-			execve(filename, NULL, environ);
-		}
-	}
-	wait(NULL);
-	close(connfd);
 }
 
-
+inline void epoll_delfd(int epollfd, int fd)
+{
+	epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, NULL);
+}
 
 class work
 {
 public:
-	work(int connfd)
+	explicit work(int connfd)
 		:connfd_(connfd)
 	{   }
 
@@ -265,6 +273,7 @@ public:
 private:
 	int connfd_;
 };
+
 
 int main(int argc, char** argv)
 {
@@ -297,7 +306,7 @@ int main(int argc, char** argv)
 		exit(0);
 	}
 
-	if (listen(listenfd, 10) < 0)
+	if (listen(listenfd, 100) < 0)
 	{
 		exit(0);
 	}
@@ -305,17 +314,38 @@ int main(int argc, char** argv)
 	//threadpool init
 	threadpool<work> pool(8, 1000);
 
-	while (true)
+	int epfd=epoll_create(128);
+	epoll_addfd(epfd, listenfd);
+	epoll_event events [MAX_EVENT_NUMBER];
+
+	for(;;)
 	{
-		int connfd=accept(listenfd, NULL, NULL);
-		work* new_accept=new work(connfd);
-		pool.append(new_accept);
+		int num=epoll_wait(epfd, events, MAX_EVENT_NUMBER, -1);
+		if (num<0)
+		{
+			exit(0);
+		}
+
+		for (int i=0; i<num; ++i)
+		{
+			int eventfd=events [i].data.fd;
+			if (eventfd==listenfd)
+			{
+				int connfd=accept(listenfd, NULL, NULL);
+				epoll_addfd(epfd, connfd);
+			}
+			else if(events[i].events & EPOLLIN)
+			{
+				pool.append(std::make_shared<work>(eventfd));
+				epoll_delfd(epfd, eventfd);
+			}
+			else
+			{
+				continue;
+			}
+		}
 	}
 
 	return 0;
 }
-
-
-
-
 
